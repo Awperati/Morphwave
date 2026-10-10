@@ -9,5 +9,4 @@ dist/
 
 # Personal settings (created on first run)
 settings.json
-dist_new/
-build_new/
+*.spec
