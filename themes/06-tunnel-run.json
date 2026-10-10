@@ -1,0 +1,60 @@
+{
+  "name": "Tunnel Run",
+  "scenes": [
+    "kifs",
+    "spheres",
+    "kleinian"
+  ],
+  "scene_beats": 16,
+  "transition_seconds": 15,
+  "palette_calm": {
+    "a": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "b": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "c": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "d": [
+      0.3,
+      0.2,
+      0.2
+    ]
+  },
+  "palette_intense": {
+    "a": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "b": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "c": [
+      1.0,
+      0.7,
+      0.4
+    ],
+    "d": [
+      0.0,
+      0.15,
+      0.2
+    ]
+  },
+  "fx": {
+    "speed": 1.6,
+    "punch": 1.0,
+    "hue_drift": 0.6,
+    "aberration": 0.6
+  }
+}

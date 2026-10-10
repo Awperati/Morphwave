@@ -1,0 +1,11 @@
+glfw==2.10.2
+moderngl==5.13.0
+numpy==2.5.3
+pillow==12.3.0
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
+SoundCard==0.4.6
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Media.Control==3.2.1

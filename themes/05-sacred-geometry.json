@@ -1,0 +1,67 @@
+{
+  "name": "Sacred Geometry",
+  "scenes": [
+    "kifs",
+    "spheres",
+    "kleinian"
+  ],
+  "scene_beats": 500,
+  "transition_seconds": 200.0,
+  "palette_calm": {
+    "a": [
+      0.5,
+      0.4,
+      0.5
+    ],
+    "b": [
+      0.5,
+      0.4,
+      0.4
+    ],
+    "c": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "d": [
+      0.0,
+      0.1,
+      0.2
+    ]
+  },
+  "palette_intense": {
+    "a": [
+      0.6,
+      0.4,
+      0.3
+    ],
+    "b": [
+      0.5,
+      0.5,
+      0.4
+    ],
+    "c": [
+      1.0,
+      1.0,
+      0.5
+    ],
+    "d": [
+      0.8,
+      0.9,
+      0.3
+    ]
+  },
+  "fx": {
+    "speed": 0.711,
+    "detail": 0.6,
+    "glow": 0.9,
+    "kaleido": 6,
+    "trails": 0.4,
+    "hue_drift": 0.2,
+    "punch": 0.7,
+    "scope": 0.5,
+    "react": 1.128,
+    "aberration": 0.3,
+    "saturation": 1.1
+  }
+}
