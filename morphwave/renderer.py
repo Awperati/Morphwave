@@ -128,10 +128,9 @@ class Renderer:
         self.win = win
         self.hwnd = glfw.get_win32_window(win)
         glfw.make_context_current(win)
-        icon = config.ASSETS / "morphwave.png"
-        if icon.exists():
-            im = Image.open(icon).convert("RGBA")
-            glfw.set_window_icon(win, 2, [im.resize((32, 32), Image.LANCZOS), im.resize((256, 256), Image.LANCZOS)])
+        ico = config.ASSETS / "morphwave.ico"
+        if ico.exists():
+            winutil.set_window_icon(glfw.get_win32_window(win), ico)   # taskbar, title bar and Alt+Tab
         self._vsync = None
         glfw.set_key_callback(win, self._on_key)
         glfw.set_cursor_pos_callback(win, self._on_mouse)

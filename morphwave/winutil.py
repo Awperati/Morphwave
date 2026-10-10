@@ -151,6 +151,25 @@ def unembed_to_popup(hwnd, x, y, w, h):
     user32.SetForegroundWindow(hwnd)
 
 
+def set_window_icon(hwnd, ico_path):
+    """Give a window the .ico for its title bar, taskbar button and Alt+Tab (big and small sizes)."""
+    LoadImageW = user32.LoadImageW
+    LoadImageW.restype = wintypes.HANDLE
+    LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SetClassLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    LR_LOADFROMFILE, IMAGE_ICON, WM_SETICON = 0x10, 1, 0x80
+    big = LoadImageW(None, str(ico_path), IMAGE_ICON, user32.GetSystemMetrics(11), user32.GetSystemMetrics(12), LR_LOADFROMFILE)
+    small = LoadImageW(None, str(ico_path), IMAGE_ICON, user32.GetSystemMetrics(49), user32.GetSystemMetrics(50), LR_LOADFROMFILE)
+    if big:
+        user32.SendMessageW(hwnd, WM_SETICON, 1, big)
+        user32.SetClassLongPtrW(hwnd, -14, big)          # GCLP_HICON
+    if small:
+        user32.SendMessageW(hwnd, WM_SETICON, 0, small)
+        user32.SetClassLongPtrW(hwnd, -34, small)        # GCLP_HICONSM
+    return bool(big and small)
+
+
 class _RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 

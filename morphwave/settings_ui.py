@@ -76,6 +76,10 @@ class SettingsWindow:
     def run(self):
         self.root = tk.Tk()
         self.root.title("Morphwave settings")
+        try:
+            self.root.iconbitmap(default=str(config.ASSETS / "morphwave.ico"))
+        except tk.TclError:
+            pass
         h = min(860, int(self.root.winfo_screenheight() * 0.85))
         self.root.geometry(f"680x{h}")
         self.root.minsize(560, 420)
