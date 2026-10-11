@@ -78,6 +78,7 @@ uniform float hueB;
 uniform float switchZ;     // world depth where A turns into B (huge = no switch pending)
 uniform float blendW;      // half-length of the morph zone along the tunnel
 uniform int aa;
+uniform float lodBias;     // level of detail: -1 sharpest .. 0 normal .. 2+ fastest (setting + automatic)
 in vec2 v_uv;
 out vec4 frag;
 
@@ -85,9 +86,20 @@ const float TAU = 6.2831853;
 
 // Level of detail: far from the camera a fractal is drawn with fewer folding iterations.
 // The lost detail is smaller than a pixel there anyway, and each step gets much cheaper.
+// lodBias moves where detail starts to drop (each +1 halves the distance), how far it drops,
+// how many march steps a ray may take and how close a ray must get to count as a hit.
 float g_lodF = 1.0;        // 1 = full detail .. ~0.45 = far away
-void setLod(float t) { g_lodF = mix(1.0, 0.45, smoothstep(5.0, 30.0, t)); }
+void setLod(float t) {
+    float k = exp2(-lodBias);
+    g_lodF = mix(1.0, clamp(0.45 - 0.12 * lodBias, 0.25, 0.7), smoothstep(5.0 * k, 30.0 * k, t));
+}
 bool lodStop(int i, int n) { return float(i) >= ceil(float(n) * g_lodF); }
+// ONE is 1 at run time but unknown to the compiler: `for (k < 4 * ONE)` keeps loops rolled,
+// so a big function called in them is compiled once instead of pasted in four times.
+#define ONE min(aa, 1)
+const vec3 NTAP[4] = vec3[4](vec3(1, -1, -1), vec3(-1, -1, 1), vec3(-1, 1, -1), vec3(1, 1, 1));
+float lodEps() { return exp2(0.6 * lodBias); }                         // hit tolerance factor
+float lodSteps(float n) { return n * clamp(1.0 - 0.15 * lodBias, 0.55, 1.2); }   // march step budget
 float smax(float a, float b, float k) {
     float h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
     return mix(b, a, h) + k * h * (1.0 - h);
@@ -378,15 +390,18 @@ vec3 tunnel(int kind, vec2 uv, vec4 seed) {
     float glow = 0.0;
     float steps = 0.0;
     bool hit = false;
-    int maxSteps = int(150.0 + 90.0 * fx_detail);
-    float far = kind == 5 ? 22.0 : 42.0;                     // look far down the tunnel
-    for (int i = 0; i < 260; i++) {
+    // the sphere packing's thin sheets make rays crawl; it gets a smaller step budget
+    int maxSteps = int(lodSteps((150.0 + 90.0 * fx_detail) * (kind == 4 ? 0.6 : 1.0)));
+    float far = kind == 5 ? 22.0 : kind == 4 ? 30.0 : 42.0;                   // look far down the tunnel
+    for (int i = 0; i < 300; i++) {
         if (i >= maxSteps) break;
         setLod(t);
         float d = tunnelDE(kind, ro + rd * t, seed);
         glow += exp(-d * 60.0) * 0.02;
-        if (d < pixel * t * (1.5 - fx_detail)) { hit = true; break; }
-        t += d * (kind == 3 ? 0.9 : 0.75) * (t > 6.0 ? 1.25 : 1.0);    // bigger strides through far empty space
+        // rays that have crawled a long way (grazing thin sheets) accept a looser hit, which stops
+        // them burning hundreds of tiny steps on detail smaller than a pixel
+        if (d < pixel * t * (1.5 - fx_detail) * lodEps() * (1.0 + float(i) * 0.02)) { hit = true; break; }
+        t += d * (kind == 3 ? 0.9 : kind == 4 ? 0.9 : 0.75) * (t > 6.0 ? 1.25 : 1.0);    // bigger strides through far empty space
         steps += 1.0;
         if (t > far) break;
     }
@@ -396,8 +411,13 @@ vec3 tunnel(int kind, vec2 uv, vec4 seed) {
         vec3 p = ro + rd * t;
         vec2 e = vec2(max(pixel * t, 1e-4), 0.0);
         const vec2 kk = vec2(1.0, -1.0);                            // 4-sample normal: a third cheaper than 6
-        vec3 n = normalize(kk.xyy * tunnelDE(kind, p + kk.xyy * e.x, seed) + kk.yyx * tunnelDE(kind, p + kk.yyx * e.x, seed)
-                         + kk.yxy * tunnelDE(kind, p + kk.yxy * e.x, seed) + kk.xxx * tunnelDE(kind, p + kk.xxx * e.x, seed));
+        vec3 n = vec3(0.0);
+        for (int k = 0; k < 5 * ONE; k++) {                   // 4 normal taps, then the point itself
+            vec3 o = k < 4 ? NTAP[k] : vec3(0.0);                 // (the last call restores its colour data)
+            float dk = tunnelDE(kind, p + o * e.x, seed);
+            n += o * dk;
+        }
+        n = normalize(n);
         vec3 l = normalize(vec3(0.4, 0.7, -0.5) - rd * 0.5);
         float dif = clamp(dot(n, l), 0.0, 1.0);
         float rim = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
@@ -405,7 +425,6 @@ vec3 tunnel(int kind, vec2 uv, vec4 seed) {
         float bands = mix(0.6, specWrap(dot(g_trap, vec3(0.2)) + p.z * 0.05), 0.4 + 0.6 * level);
         col = trapCol * (0.15 + 0.85 * dif) * ao * (0.4 + 0.8 * bands);
         col += pal(0.5) * rim * (0.3 + 1.2 * high) * fx_glow;
-        tunnelDE(kind, p, seed);                                // restore this point's colour data
         float rz = p.z - ro.z;
         float bandsLit = specWrap(rz * 0.07 + 0.3 * dot(g_trap, vec3(0.3)));
         col += trapCol * bandsLit * level * 0.35 * fx_react;
@@ -613,14 +632,18 @@ float journeyDE(vec3 w) {
     g_blend = s;
     g_trap = vec3(1e9);
     float rip = meshRipple(w, rz);
-    if (s <= 0.0) return (famDE(famA, w, parA) - rip) * swell * 0.8;
-    if (s >= 1.0) return (famDE(famB, w, parB) - rip) * swell * 0.8;
-    float dA = famDE(famA, w, parA);
-    vec3 tA = g_trap;
-    g_trap = vec3(1e9);
-    float dB = famDE(famB, w, parB);
-    g_trap = mix(tA, g_trap, s);
-    return (mix(dA, dB, s) - rip) * swell * 0.75;
+    // evaluate A and/or B (only what this point needs) through a single famDE call site
+    float d = 0.0;
+    vec3 trap = vec3(0.0);
+    for (int k = 0; k < 2 * ONE; k++) {
+        float wk = k == 0 ? 1.0 - s : s;
+        if (wk <= 0.0) continue;
+        g_trap = vec3(1e9);
+        d += wk * famDE(k == 0 ? famA : famB, w, k == 0 ? parA : parB);
+        trap += wk * g_trap;
+    }
+    g_trap = trap;
+    return (d - rip) * swell * (s <= 0.0 || s >= 1.0 ? 0.8 : 0.75);
 }
 
 vec3 journey(vec2 uv) {
@@ -634,13 +657,15 @@ vec3 journey(vec2 uv) {
     float glow = 0.0;
     float steps = 0.0;
     bool hit = false;
-    int maxSteps = int(150.0 + 90.0 * fx_detail);
-    for (int i = 0; i < 260; i++) {
+    int maxSteps = int(lodSteps(150.0 + 90.0 * fx_detail));
+    for (int i = 0; i < 300; i++) {
         if (i >= maxSteps) break;
         setLod(t);
         float d = journeyDE(ro + rd * t);
         glow += exp(-d * 60.0) * 0.02;
-        if (d < pixel * t * (1.5 - fx_detail)) { hit = true; break; }
+        // rays that have crawled a long way (grazing thin sheets) accept a looser hit, which stops
+        // them burning hundreds of tiny steps on detail smaller than a pixel
+        if (d < pixel * t * (1.5 - fx_detail) * lodEps() * (1.0 + float(i) * 0.02)) { hit = true; break; }
         t += d * 0.8 * (t > 6.0 ? 1.25 : 1.0);
         steps += 1.0;
         if (t > 42.0) break;
@@ -652,9 +677,12 @@ vec3 journey(vec2 uv) {
     if (hit) {
         vec2 e = vec2(max(pixel * t, 1e-4), 0.0);
         const vec2 kk = vec2(1.0, -1.0);
-        vec3 n = normalize(kk.xyy * journeyDE(p + kk.xyy * e.x) + kk.yyx * journeyDE(p + kk.yyx * e.x)
-                         + kk.yxy * journeyDE(p + kk.yxy * e.x) + kk.xxx * journeyDE(p + kk.xxx * e.x));
-        journeyDE(p);                                           // restore this point's colour data
+        vec3 n = vec3(0.0);
+        for (int k = 0; k < 5 * ONE; k++) {                   // 4 normal taps, then the point itself
+            vec3 o = k < 4 ? NTAP[k] : vec3(0.0);
+            n += o * journeyDE(p + o * e.x);
+        }
+        n = normalize(n);
         vec3 l = normalize(vec3(0.4, 0.7, -0.5) - rd * 0.5);
         float dif = clamp(dot(n, l), 0.0, 1.0);
         float rim = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
@@ -688,7 +716,11 @@ float vnoise3(vec3 p) {
 }
 
 // One watching eye in a tile: swirling iris that dilates with the bass.
-vec3 eyeTile(vec2 uv, float density, vec3 tissue, float tOff) {
+vec3 eyeTileLod(vec2 uv, float density, vec3 tissue, float tOff, float fw);
+vec3 eyeTile(vec2 uv, float density, vec3 tissue, float tOff) { return eyeTileLod(uv, density, tissue, tOff, 0.0); }
+// fw: how much uv changes per pixel; when an eye shrinks to a few pixels it fades to its average
+// colour instead of sparkling
+vec3 eyeTileLod(vec2 uv, float density, vec3 tissue, float tOff, float fw) {
     vec2 g = uv * density;
     vec2 l = hexLocal(g);
     vec2 id = g - l;
@@ -698,13 +730,14 @@ vec3 eyeTile(vec2 uv, float density, vec3 tissue, float tOff) {
     float open = 0.36 * (1.0 - blink);
     float lid = abs(l.y) - open * sqrt(max(0.0, 1.0 - (l.x * l.x) / 0.16));
     float ang = atan(l.y, l.x);
-    float swirl = 0.5 + 0.5 * sin(ang * 3.0 + d * 26.0 - time * (1.0 + 2.5 * mid) + h * 6.0);
+    float swirl = 0.5 + 0.5 * sin(ang * 3.0 + d * 26.0 - time * 0.8 - spin * 1.2 + h * 6.0);   // steady, faster with mids
     vec3 iris = mix(pal(0.55 + tOff), vec3(0.92, 0.95, 1.0), swirl * swirl);
     float pupil = 0.07 + 0.07 * bass;
     vec3 col = tissue * (0.55 + 0.45 * smoothstep(0.5, 0.3, d));             // raised skin around each eye
     if (lid < 0.0 && d < 0.34) col = d < pupil ? vec3(0.02) : iris * (0.6 + 0.6 * level);
     col = mix(col, tissue * 0.25, smoothstep(0.012, 0.0, abs(lid)) * step(d, 0.4));   // dark lid line
-    return col;
+    vec3 avg = mix(tissue * 0.8, pal(0.55 + tOff) * 0.5, 0.3);
+    return mix(col, avg, smoothstep(0.12, 0.3, fw * density));
 }
 
 // ---------------- Net of Being: an endless hall of arches, walls made of eyes ----------------
@@ -714,6 +747,11 @@ float sdArch(vec2 p, float w) {
     return min(box, length(p - vec2(0.0, 0.2)) - w);
 }
 float g_part;
+// Colour waves that ripple out of the far end of the hall towards the camera. They also
+// bend the hall itself, so the walls and arches physically ripple as each wave passes.
+float nobWave(float rz, float ang) {
+    return sin(rz * 2.2 + time * 4.0 + ang + 1.5 * sin(rz * 0.3 - time * 0.7)) * smoothstep(0.0, 1.5, rz);
+}
 float nobDE(vec3 p) {
     float rz = p.z - g_camZ;
     // the hall is alive: it twists with the mids, its walls undulate in travelling waves,
@@ -729,25 +767,33 @@ float nobDE(vec3 p) {
     float wall = -a;
     float frame = min(max(-(a + 0.2), abs(zf) - 0.14), max(-(a + 0.3), abs(zf) - 0.05));
     g_part = frame < wall ? 1.0 : 0.0;
-    return (min(wall, frame) - meshRipple(p, rz) * 1.5) * 0.65;
+    float amp = fx_react * (0.03 + 0.07 * level + 0.06 * bass);
+    float wv = nobWave(rz, atan(p.y - 0.1, p.x)) * amp;
+    return (min(wall, frame) - meshRipple(p, rz) * 1.5 - wv) * 0.6;
 }
 vec3 netOfBeing(vec2 uv) {
+    // the camera stays centred and keeps spinning as it falls further down the hall;
+    // the spin speeds up with the mids (via `spin`) and with the distance travelled
     vec3 ro = vec3(0.0, -0.05, travel * FLY);
     g_camZ = ro.z;
     vec3 rd = normalize(vec3(uv, 1.25));
-    rd.xy = rot(0.04 * sin(spin * 0.2)) * rd.xy;
+    rd.xy = rot(spin * 0.12 + travel * 0.05) * rd.xy;
     float t = 0.0;
     bool hit = false;
     float steps = 0.0;
     float pixel = 1.0 / resolution.y;
-    for (int i = 0; i < 220; i++) {
+    float nSteps = lodSteps(220.0);
+    for (int i = 0; i < 260; i++) {
+        if (float(i) >= nSteps) break;
         float d = nobDE(ro + rd * t);
-        if (d < pixel * t * 1.2) { hit = true; break; }
-        t += d;
+        if (d < pixel * t * 1.2 * lodEps()) { hit = true; break; }
+        t += d * 0.85;                                     // the warped hall needs slightly careful steps
         steps += 1.0;
         if (t > 60.0) break;
     }
-    vec3 fogc = pal(0.12) * 1.3 + vec3(0.25, 0.35, 0.15);                    // the glow deep in the hall
+    // colours drift through the palette over time and along the hall; bass nudges them
+    float hueS = atime * 0.025 + 0.12 * bass * fx_react;
+    vec3 fogc = pal(0.12 + hueS) * 1.3 + vec3(0.25, 0.35, 0.15);                // the glow deep in the hall
     if (!hit) return fogc;
     vec3 p = ro + rd * t;
     vec2 e = vec2(pixel * t + 1e-4, 0.0);
@@ -755,19 +801,31 @@ vec3 netOfBeing(vec2 uv) {
                             nobDE(p + e.yyx) - nobDE(p - e.yyx)));
     nobDE(p);
     float part = g_part;
-    float u = atan(p.y - 0.1, p.x) * 1.1;
-    vec3 tissue = pal(0.02 + 0.08 * sin(p.z * 0.7)) * (0.5 + 0.5 * specWrap(p.z * 0.05) * (0.4 + 0.6 * level));
+    // 1.1141 = 7 hex columns per radian band: the eye pattern wraps round with no seam
+    float u = atan(p.y - 0.1, p.x) * 1.1141;
+    float hz = hueS + 0.2 * sin(p.z * 0.07 - atime * 0.05);
+    vec3 tissue = pal(0.02 + hz + 0.08 * sin(p.z * 0.7)) * (0.5 + 0.5 * specWrap(p.z * 0.05) * (0.4 + 0.6 * level));
     vec3 col;
+    float fwp = pixel * t / max(abs(dot(n, rd)), 0.15);                  // world size of a pixel here
     if (part > 0.5) {
-        col = eyeTile(p.xy * 1.6, 3.0, tissue * vec3(1.2, 0.9, 0.5), 0.1);   // arch faces lie in the x-y plane
+        // arch ribs: carved, ridged flesh (tiling eyes over them sliced eyes at every edge)
+        float az = atan(p.y - 0.2, p.x);
+        float ridge = 0.5 + 0.5 * sin((abs(n.z) > 0.6 ? length(p.xy - vec2(0.0, 0.2)) : p.z) * 40.0 + az * 2.0);
+        ridge = mix(ridge, 0.5, smoothstep(0.02, 0.06, fwp));               // fade the ridges out far away
+        col = tissue * vec3(1.2, 0.9, 0.5) * (0.55 + 0.6 * ridge) + pal(0.55 + hz) * 0.25 * specWrap(az * 0.3 + p.z * 0.1) * level;
         vec2 fe = vec2(abs(p.x) - 0.28, p.y - 0.75);                          // a watching face on every arch
         float fd = length(fe * vec2(1.0, 1.6));
-        if (fd < 0.11) col = fd < 0.04 + 0.02 * bass ? vec3(0.02) : mix(pal(0.6), vec3(1.0), 0.4) * (0.7 + 0.5 * level);
+        if (fd < 0.11) col = fd < 0.04 + 0.02 * bass ? vec3(0.02) : mix(pal(0.6 + hz), vec3(1.0), 0.4) * (0.7 + 0.5 * level);
     } else {
-        col = eyeTile(vec2(u + 0.04 * sin(p.z * 0.8 + time * 0.6), p.z + 0.05 * sin(u * 3.0 + time * 0.8)), 4.0, tissue, 0.0);
+        col = eyeTileLod(vec2(u + 0.04 * sin(p.z * 0.8 + time * 0.6), p.z + 0.05 * sin(u * 3.0 + time * 0.8)), 4.0, tissue, hz, pixel * t * 1.3);   // isotropic: walls are always seen edge-on
     }
     float dif = clamp(dot(n, normalize(vec3(0.3, 0.6, -0.7))), 0.0, 1.0);
-    col *= (0.45 + 0.75 * dif) * (1.0 - steps / 200.0);
+    // ambient occlusion from the distance field itself (a step-count AO drew dark ghost
+    // outlines wherever rays skimmed past an arch frame)
+    float ao = clamp(nobDE(p + n * 0.12) / (0.12 * 0.65), 0.0, 1.0);
+    col *= (0.45 + 0.75 * dif) * (0.55 + 0.45 * ao);
+    float wv = nobWave(p.z - ro.z, atan(p.y - 0.1, p.x));
+    col += pal(0.3 + hz + 0.15 * wv) * max(wv, 0.0) * (0.15 + 0.45 * level) * fx_react;   // the wave's colour
     return mix(col, fogc, 1.0 - exp(-t * 0.09));
 }
 
@@ -857,8 +915,9 @@ vec3 cosmicOcean(vec2 uv) {
     float t = 0.0;
     bool hit = false;
     for (int i = 0; i < 220; i++) {
+        if (float(i) >= lodSteps(220.0)) break;
         float d = oceanDE(ro + rd * t);
-        if (d < 0.0012 * t) { hit = true; break; }
+        if (d < 0.0012 * t * lodEps()) { hit = true; break; }
         t += d;
         if (t > 70.0) break;
     }
@@ -920,11 +979,11 @@ vec3 woodsCol(int which, float ph) {
 }
 float woodsPhase() { return atime * 0.012 + travel * 0.004 + 0.25 * (vibeBright - 0.5); }
 float trunkRadius(float y) {
-    return 0.34 * (1.0 - clamp(y / 70.0, 0.0, 0.9)) + 0.42 * exp(-max(y, 0.0) * 2.5);
+    return 0.34 * (1.0 - clamp(y / 70.0, 0.0, 0.9)) + 0.38 * exp(-max(y, 0.0) * 2.5);
 }
 float woodsDE(vec3 p) {
     vec2 cell = floor(p.xz / 2.4 + 0.5);
-    vec2 jit = (vec2(hash2(cell), hash2(cell + 7.1)) - 0.5) * 0.8;
+    vec2 jit = (vec2(hash2(cell), hash2(cell + 7.1)) - 0.5) * 0.4;      // small, so trees stay inside their cell
     vec2 l = p.xz - cell * 2.4 - jit;
     float r = length(l);
     float ang = atan(l.y, l.x);
@@ -936,7 +995,8 @@ float woodsDE(vec3 p) {
     float sway = fx_react * (0.12 * mid + 0.08 * tb * level) * sin(p.y * 0.25 + atime * 1.3 + hash2(cell) * 6.0) * min(p.y * 0.1, 1.0);
     l.x += sway;
     r = length(l);
-    float trunk = path ? 10.0 : (r - trunkRadius(p.y) * (1.0 + fx_react * (0.12 * bass + 0.18 * tb * level)) + grooves) * 0.7;
+    // only the slender upper part breathes with the music; the flared base is already near the cell edge
+    float trunk = path ? 10.0 : (r - trunkRadius(p.y) - 0.34 * fx_react * (0.12 * bass + 0.18 * tb * level) + grooves) * 0.7;
     // Branches that grow over time: the longer the scene runs, the more branches sprout,
     // and each grows its own side-branches, which grow twigs of their own. They stay inside
     // their tree's cell (no clipping at cell edges) and only the nearest slots are checked.
@@ -955,7 +1015,7 @@ float woodsDE(vec3 p) {
                 float ba = hb * 6.28318 + float(j) * 3.14159;
                 vec3 dir = normalize(vec3(cos(ba), 0.6, sin(ba)));
                 vec3 b0 = vec3(0.0, by, 0.0) + vec3(cos(ba), 0.0, sin(ba)) * trunkRadius(by) * 0.8;
-                vec3 b1 = b0 + dir * 0.45 * grownA;
+                vec3 b1 = b0 + dir * 0.32 * grownA;
                 branches = min(branches, sdCap3(lp, b0, b1, 0.045 * (0.5 + 0.5 * grownA)));
                 // second generation: two side-branches from the end
                 float grownB = smoothstep(0.35 + hb * 0.4, 0.5 + hb * 0.4, g_growth);
@@ -963,7 +1023,7 @@ float woodsDE(vec3 p) {
                     for (int q = 0; q < 2; q++) {
                         float sa = ba + (float(q) - 0.5) * 1.3;
                         vec3 d2 = normalize(vec3(cos(sa), 0.9, sin(sa)));
-                        vec3 c1 = b1 + d2 * 0.22 * grownB;
+                        vec3 c1 = b1 + d2 * 0.16 * grownB;
                         branches = min(branches, sdCap3(lp, b1, c1, 0.026 * (0.5 + 0.5 * grownB)));
                         // third generation: twigs, skipped far away (level of detail)
                         float grownC = smoothstep(0.65 + hb * 0.3, 0.8 + hb * 0.2, g_growth);
@@ -971,7 +1031,7 @@ float woodsDE(vec3 p) {
                             for (int u = 0; u < 2; u++) {
                                 float ta = sa + (float(u) - 0.5) * 1.1;
                                 vec3 d3 = normalize(vec3(cos(ta), 1.2, sin(ta)));
-                                branches = min(branches, sdCap3(lp, c1, c1 + d3 * 0.1 * grownC, 0.013));
+                                branches = min(branches, sdCap3(lp, c1, c1 + d3 * 0.07 * grownC, 0.013));
                             }
                         }
                     }
@@ -991,6 +1051,9 @@ float woodsDE(vec3 p) {
     g_part = trunk < ground ? 1.0 : 0.0;
     if (branches < min(trunk, ground)) g_part = 3.0;
     trunk = min(trunk, branches * 0.9);
+    // never step further than just past this cell's edge
+    vec2 edge = 1.2 - abs(p.xz - cell * 2.4);
+    trunk = min(trunk, max(min(edge.x, edge.y), 0.0) + 0.15);   // trees stay 0.15 inside their cell
     return min(trunk, ground) - meshRipple(p, p.z - g_camZ) * 0.5;
 }
 vec3 watchingWoods(vec2 uv) {
@@ -1006,8 +1069,9 @@ vec3 watchingWoods(vec2 uv) {
     bool hit = false;
     for (int i = 0; i < 260; i++) {
         setLod(t);
+        if (float(i) >= lodSteps(260.0)) break;
         float d = woodsDE(ro + rd * t);
-        if (d < 0.0012 * t) { hit = true; break; }
+        if (d < 0.0012 * t * lodEps()) { hit = true; break; }
         t += d;
         if (t > 90.0) break;
     }
@@ -1156,9 +1220,10 @@ vec3 cubeCascade(vec2 uv) {
     bool hit = false;
     float steps = 0.0;
     for (int i = 0; i < 240; i++) {
+        if (float(i) >= lodSteps(240.0)) break;
         vec3 p = ro + rd * t;
         float d = cubeDE(p);
-        if (d < 0.0012 * t) { hit = true; break; }
+        if (d < 0.0012 * t * lodEps()) { hit = true; break; }
         // over-relaxed stepping far away: fewer steps for the distant shells
         t += d * (t > 4.0 ? 1.15 : 1.0);
         steps += 1.0;
@@ -1192,6 +1257,222 @@ vec3 cubeCascade(vec2 uv) {
     return mix(col, haze, smoothstep(0.0, 1.0, 1.0 - exp(-t * 0.06)) * 0.8);
 }
 
+// ---------------- All-Seeing Spiral: an engraved tunnel of curling waves and watching eyes ----------------
+// Rings stream towards you out of a giant eye. Each ring is a band covered in watching eyes,
+// and between the rings stand circles of curling wave-scrolls that face you and wind up with
+// the music. Everything is drawn like an engraving: blue ink hatching on pale paper, lines
+// thickening in shadow, with a slightly misprinted red second pass.
+const float EY_R = 1.75;      // tunnel wall radius
+const float EY_S = 1.35;      // ring spacing along the tunnel
+const float EY_N = 9.0;       // curls per ring
+const float EY_NE = 7.0;      // eyes per band
+const float EY_END = 10.5;    // the giant eye's distance ahead of the camera
+float g_eyPart;               // 0 wall, 1 band, 2 curl, 3 eyeball, 4 giant eye
+float g_eySpiral;             // curl: position across its spiral arms
+float g_eyCurlR;              // curl: distance from its centre / its size
+vec2 g_eyEye;                 // eyeball: position on the eye, -1..1 across
+float g_eyId;                 // which ring / eye, for variety
+
+float eyTwist(float z) { return 0.22 * sin(z * 0.11 + atime * 0.05) + spin * 0.06; }
+
+// distance to the centre line of an Archimedean spiral that winds `rot` around
+float eySpiral(vec2 q, float pitch, float rot, out float k) {
+    float r = length(q);
+    float a = atan(q.y, q.x) + rot;
+    k = r / pitch - a / TAU;
+    // no clamp on the arm index: as `rot` grows the arms keep winding in towards the heart
+    return abs(k - floor(k + 0.5)) * pitch;
+}
+
+float eyDE(vec3 p) {
+    float rz = p.z - g_camZ;
+    float r = length(p.xy);
+    float ang = atan(p.y, p.x) + eyTwist(p.z);
+    float swellB = 1.0 + fx_react * 0.06 * bass;
+    float wall = EY_R * swellB + 0.05 - r;
+    float d = wall;
+    g_eyPart = 0.0;
+
+    // ---- bands of eyes (one per ring) ----
+    float zc = p.z / EY_S;
+    float zi = floor(zc);
+    float zf = (fract(zc) - 0.5) * EY_S;
+    float band = spec(fract(abs(zi) * 0.073 + 0.05));
+    float bh = 0.26 + 0.05 * band * level * fx_react;        // band height from the wall
+    float h = EY_R * swellB - r;                              // height above the wall
+    vec2 bq = vec2(zf, h - bh);
+    vec2 bb = abs(bq) - vec2(0.07, bh);
+    float dBand = length(max(bb, 0.0)) + min(max(bb.x, bb.y), 0.0) - 0.035;
+    if (dBand < d) { d = dBand; g_eyPart = 1.0; g_eyId = zi; }
+    // eyeballs bulging from the band's front face
+    float seg = TAU / EY_NE;
+    float ae = ang + zi * 0.9;
+    float ce = floor(ae / seg + 0.5);
+    float rm = EY_R * swellB - bh;
+    vec3 eq = vec3((ae - ce * seg) * rm, h - bh, zf + 0.085);
+    float dEye = length(eq * vec3(0.42, 0.95, 1.5)) - 0.09;
+    if (dEye * 0.5 < d) { d = dEye * 0.5; g_eyPart = 3.0; g_eyEye = eq.xy / vec2(0.2, 0.1); g_eyId = zi * 13.0 + ce; }
+
+    // ---- circles of curling scrolls between the bands ----
+    float zc2 = zc + 0.5;
+    float zi2 = floor(zc2);
+    float zf2 = (fract(zc2) - 0.5) * EY_S;
+    float segC = TAU / EY_N;
+    float ac = ang + mod(zi2, 2.0) * 0.5 * segC;
+    float cc = floor(ac / segC + 0.5);
+    vec2 u = vec2((ac - cc * segC) * (EY_R - 0.3), h);
+    float cb = spec(fract(cc / EY_N * 0.6 + abs(zi2) * 0.05));
+    float size = 0.3 * (1.0 + fx_react * 0.18 * cb * level);
+    vec2 q = u - vec2(0.0, size + 0.02);
+    if (mod(cc + zi2, 2.0) > 0.5) q.x = -q.x;                     // neighbours curl the other way
+    float k;
+    float pitch = size * 0.36;
+    float sd = eySpiral(q, pitch, atime * 0.35 + spin * 0.6 + zi2 * 1.7, k);
+    float cr = length(q);
+    sd = max(sd, cr - size);                                      // only inside its circle
+    float th = 0.02 + 0.024 * cr / size;                          // thinner at the heart
+    vec2 cq = vec2(sd - th, abs(zf2) - 0.05);
+    float dCurl = (length(max(cq, 0.0)) + min(max(cq.x, cq.y), 0.0)) * 0.7;
+    if (dCurl < d) { d = dCurl; g_eyPart = 2.0; g_eySpiral = k; g_eyCurlR = cr / size; g_eyId = zi2 * 7.0 + cc; }
+
+    // ---- the giant eye at the end ----
+    float dEnd = g_camZ + EY_END - p.z;
+    if (dEnd < d) { d = dEnd; g_eyPart = 4.0; }
+    return d;
+}
+
+// Engraving: parallel lines along `coord`, spaced about `spacing` pixels apart on screen
+// (fw = how much coord changes per pixel). Lines thicken with `dark`. Octaves cross-fade
+// so the spacing stays even at any distance. `shift` moves them (the red misprint).
+float eyHatch(float coord, float fw, float dark, float shift) {
+    float P = fw * 4.5 * resolution.y / 1080.0;
+    float lv = log2(max(P, 1e-6));
+    float o = floor(lv);
+    float f = lv - o;
+    float res = 0.0;
+    for (int j = 0; j < 2; j++) {
+        float per = exp2(o + float(j));
+        float x = abs(fract(coord / per + shift) - 0.5) * per;
+        float hw = clamp(dark, 0.0, 1.0) * 0.5 * per;
+        float l = 1.0 - smoothstep(hw - fw * 0.6, hw + fw * 0.6, x);
+        res += l * (j == 0 ? 1.0 - f : f);
+    }
+    return res;
+}
+
+// A watching eye drawn in ink. q: -1..1 across the almond. Returns blue ink, red ink,
+// and how much of it is the coloured iris (z) and a white highlight (w).
+vec4 eyInkEye(vec2 q, float fw, float seed, float big) {
+    float blink = smoothstep(0.0, 0.06, abs(fract(time * 0.05 + seed * 0.37) - 0.5) - 0.44);
+    float open = 0.55 * (1.0 - blink);
+    float lid = abs(q.y) - open * (1.0 - q.x * q.x);
+    float lw = fw * (big > 0.5 ? 2.5 : 1.6) + 0.02;
+    float blue = 1.0 - smoothstep(lw, lw + fw, abs(lid));
+    float red = 1.0 - smoothstep(lw * 0.8, lw * 0.8 + fw, abs(lid + 0.07));
+    float inside = step(lid, 0.0) * step(abs(q.x), 1.0);
+    vec2 look = 0.25 * vec2(sin(time * 0.31 + seed), 0.4 * sin(time * 0.23 + seed * 2.0));
+    vec2 iq = q - look;
+    float ir = length(iq);
+    float irisR = 0.42;
+    float iris = inside * (1.0 - smoothstep(irisR - fw, irisR + fw, ir));
+    float pupil = 0.13 + 0.12 * bass * fx_react;
+    // iris: radial engraved spokes, darker towards the rim; pupil solid ink
+    float spokes = eyHatch(atan(iq.y, iq.x) * 0.25, fw * 0.25 / max(ir, 0.05), 0.35 + 0.5 * smoothstep(0.2, irisR, ir), 0.0);
+    blue = max(blue, iris * max(spokes, step(ir, pupil)));
+    blue = max(blue, inside * (1.0 - smoothstep(fw, 2.0 * fw, abs(ir - irisR))));
+    red = max(red, iris * (1.0 - smoothstep(fw, 2.0 * fw, abs(ir - irisR * 0.7))) * 0.8);
+    // sclera: a few lines following the lids
+    blue = max(blue, inside * (1.0 - iris) * eyHatch(lid, fw, 0.25, 0.0) * smoothstep(-0.25, -0.02, lid));
+    float hl = inside * (1.0 - smoothstep(0.0, 0.06, length(iq - vec2(-0.12, 0.12))));
+    float hl2 = inside * (1.0 - smoothstep(0.0, 0.04, length(iq - vec2(0.1, 0.05))));
+    return vec4(blue * (1.0 - hl), max(red, hl2) * (1.0 - hl), iris * (1.0 - step(ir, pupil)), hl);
+}
+
+vec3 allSeeing(vec2 uv) {
+    vec3 ro = vec3(0.0, 0.0, travel * FLY);
+    g_camZ = ro.z;
+    vec3 rd = normalize(vec3(uv, 1.0));
+    rd.xy = rot(0.05 * sin(time * 0.1)) * rd.xy;
+    float pixel = 1.0 / resolution.y;
+    float t = 0.05;
+    float tNear = 1e9;
+    float steps = 0.0;
+    float nSteps = lodSteps(170.0);
+    for (int i = 0; i < 200; i++) {
+        if (float(i) >= nSteps) break;
+        float d = eyDE(ro + rd * t);
+        if (d < pixel * t * 3.0 && tNear > 1e8) tNear = t;            // first close pass
+        if (d < pixel * t * 0.8 * lodEps()) break;
+        t += d * 0.8;
+        steps += 1.0;
+        if (t > EY_END + 2.0) break;
+    }
+    vec3 p = ro + rd * t;
+    vec2 e = vec2(max(pixel * t, 1e-4), 0.0);
+    const vec2 kk = vec2(1.0, -1.0);
+    vec3 n = normalize(kk.xyy * eyDE(p + kk.xyy * e.x) + kk.yyx * eyDE(p + kk.yyx * e.x)
+                     + kk.yxy * eyDE(p + kk.yxy * e.x) + kk.xxx * eyDE(p + kk.xxx * e.x));
+    eyDE(p);                                                              // restore this point's data
+    float part = g_eyPart;
+    float rz = p.z - ro.z;
+    float facing = max(abs(dot(n, rd)), 0.12);
+    float fw = pixel * t / facing;                                        // world size of one pixel here
+
+    // light from over your shoulder, a beat pulse rolling down the tunnel
+    vec3 L = normalize(vec3(-0.45, 0.55, -0.7));
+    float dif = clamp(dot(n, L), 0.0, 1.0);
+    float ao = 1.0 - 0.6 * steps / nSteps;
+    float front = beatAge * 6.0;
+    float pulse = exp(-pow((rz - front) * 0.7, 2.0)) * exp(-beatAge * 1.2) * fx_react * fx_punch;
+    float light = (0.1 + 0.9 * dif) * ao + 0.5 * pulse;
+    // lit faces stay almost bare paper; shade fills in fast (engravings are high-contrast)
+    float dark = clamp(0.1 + smoothstep(0.15, 0.85, 1.0 - light) * (0.8 + 0.4 * level), 0.0, 1.0);
+    if (part > 2.5 && part < 3.5) dark *= 0.35;
+
+    float r = length(p.xy);
+    float ang = atan(p.y, p.x) + eyTwist(p.z);
+    float coord, coord2;
+    if (part < 0.5) { coord = p.z; coord2 = ang * EY_R; }                       // rings round the tube
+    else if (part < 1.5) { coord = abs(n.z) > 0.5 ? r : p.z; coord2 = ang * r; }   // band face / band rim
+    else if (part < 2.5) { coord = g_eySpiral * 0.11; coord2 = r; }                 // lines follow the curl
+    else { coord = r; coord2 = ang * r; }
+
+    float blue = eyHatch(coord, fw, dark, 0.0);
+    float red = eyHatch(coord, fw, dark * 0.85, 0.35) * 0.9;
+    blue = max(blue, eyHatch(coord2, fw, (dark - 0.55) * 1.6, 0.0));               // cross-hatch in deep shade
+    float glowIris = 0.0;
+    vec3 irisCol = pal(0.55 + 0.3 * specWrap(g_eyId * 0.07));
+    if (part > 2.5 && part < 3.5) {                                           // the small watching eyes
+        vec4 ink = eyInkEye(g_eyEye, fw / 0.1, g_eyId, 0.0);
+        blue = mix(blue * 0.3, 1.0, ink.x);
+        red = max(red * 0.3, ink.y);
+        glowIris = ink.z;
+    } else if (part > 3.5) {                                                  // the giant eye at the end
+        vec2 q = rot(-eyTwist(p.z)) * p.xy / vec2(1.25, 1.25);
+        vec4 ink = eyInkEye(q, fw / 1.25, 0.0, 1.0);
+        float outside = smoothstep(0.0, 0.02, abs(q.y) - 0.55 * (1.0 - q.x * q.x)) + step(1.0, abs(q.x));
+        // around the eye: faint rings, the same pale paper the far tunnel fades into
+        float rings = eyHatch(length(q) * 2.0, fw * 2.0 / 1.25, 0.12 + 0.15 * specWrap(length(q) * 0.5 - time * 0.05), 0.0);
+        blue = mix(ink.x, rings * 0.5, clamp(outside, 0.0, 1.0));
+        red = mix(ink.y, 0.0, clamp(outside, 0.0, 1.0));
+        glowIris = ink.z;
+    }
+    // silhouettes: rays that skimmed past something nearer before landing here
+    if (tNear < t * 0.93 - 0.03) { blue = max(blue, 0.85); red = max(red, 0.4); }
+
+    vec3 paper = mix(vec3(0.97, 0.96, 1.0), pal(0.15) * 0.3 + vec3(0.72, 0.68, 0.95), 0.25 + 0.25 * (1.0 - vibeBright));
+    vec3 blueInk = mix(vec3(0.1, 0.14, 0.82), pal(0.62) * vec3(0.4, 0.5, 1.0), 0.25);
+    vec3 redInk = mix(vec3(0.88, 0.1, 0.18), pal(0.02) * vec3(1.0, 0.4, 0.5), 0.2);
+    vec3 col = paper * (1.0 + 0.4 * pulse);
+    col = mix(col, redInk, clamp(red, 0.0, 1.0) * 0.8);
+    col = mix(col, blueInk, clamp(blue, 0.0, 1.0));
+    col = mix(col, irisCol * (0.7 + 0.9 * high * level) + 0.15, glowIris * (0.35 + 0.5 * level) * fx_react);
+    // Far rings fade completely into the paper before they reach the giant eye's wall,
+    // so new rings grow out of the haze instead of popping out of the wall.
+    if (part < 3.5) col = mix(col, paper, smoothstep(EY_END - 6.0, EY_END - 0.4, rz));
+    return col;
+}
+
 // ---------------- dispatch ----------------
 float g_zoom = 1.0;   // >1 dives the view into the centre (used for the fall between scenes)
 vec3 sceneColor(int id, vec4 seed) {
@@ -1201,44 +1482,46 @@ vec3 sceneColor(int id, vec4 seed) {
     if (id == 8) return cosmicOcean((fc - 0.5 * resolution) / resolution.y);
     if (id == 9) return watchingWoods((fc - 0.5 * resolution) / resolution.y);
     if (id == 10) return cubeCascade((fc - 0.5 * resolution) / resolution.y);
+    if (id == 11) return allSeeing((fc - 0.5 * resolution) / resolution.y);
     if (id >= 3) return tunnel(id, (fc - 0.5 * resolution) / resolution.y, seed);
+    int n = lodBias > 0.9 ? max(1, aa - 1) : aa;
     vec3 acc = vec3(0.0);
-    for (int j = 0; j < aa; j++) {
-        for (int i = 0; i < aa; i++) {
-            vec2 o = (vec2(float(i), float(j)) + 0.5) / float(aa) - 0.5;
+    for (int j = 0; j < n; j++) {
+        for (int i = 0; i < n; i++) {
+            vec2 o = (vec2(float(i), float(j)) + 0.5) / float(n) - 0.5;
             acc += falling(id, (fc + o - 0.5 * resolution) / resolution.y, seed);
         }
     }
-    return acc / float(aa * aa);
+    return acc / float(n * n);
 }
 
 void main() {
     // Fall into the next scene: it opens as a portal at the vanishing point and swells
     // outwards faster and faster until it fills the screen, while the camera accelerates.
     // Each pixel only renders the scene(s) it can actually show, so the transition costs
-    // little more than a single scene.
-    vec3 col;
+    // little more than a single scene. (One sceneColor call site: compiled once, not 4x.)
+    vec3 col = vec3(0.0);
+    float m = 0.0, zoomA = 1.0, zoomB = 1.0, rimGlow = 0.0;
     if (mixAB > 0.0) {
         vec2 pp = (gl_FragCoord.xy - 0.5 * resolution) / resolution.y;
         float grow = smoothstep(0.25, 1.0, mixAB);
         float rad = grow * grow * 1.3;                                  // accelerating opening
         float edge = 0.04 + 0.12 * grow;
-        float m = 1.0 - smoothstep(rad - edge, rad + edge, length(pp) * (1.0 + 0.15 * sin(atan(pp.y, pp.x) * 6.0 + time)));
+        m = 1.0 - smoothstep(rad - edge, rad + edge, length(pp) * (1.0 + 0.15 * sin(atan(pp.y, pp.x) * 6.0 + time)));
         // the old scene's view plunges into the centre, faster and faster (only the view moves)
-        float zoomA = 1.0 + 6.0 * grow * grow * grow;
+        zoomA = 1.0 + 6.0 * grow * grow * grow;
         // the new scene starts as a wide, far-away view inside the opening and settles to normal
-        float zoomB = mix(0.35, 1.0, grow * grow);
-        if (m >= 0.999) { g_zoom = zoomB; col = sceneColor(sceneB, seedB); }
-        else {
-            g_zoom = zoomA; col = sceneColor(sceneA, seedA);
-            if (m > 0.001) { g_zoom = zoomB; col = mix(col, sceneColor(sceneB, seedB), m); }
-        }
-        g_zoom = 1.0;
-        float rim = exp(-pow((length(pp) - rad) / (edge + 0.01), 2.0)) * step(0.01, grow) * (1.0 - grow);
-        col += pal(0.6 + time * 0.05) * rim * 0.6;                      // a glowing rim around the opening
-    } else {
-        col = sceneColor(sceneA, seedA);
+        zoomB = mix(0.35, 1.0, grow * grow);
+        rimGlow = exp(-pow((length(pp) - rad) / (edge + 0.01), 2.0)) * step(0.01, grow) * (1.0 - grow);
     }
+    for (int k = 0; k < 2 * ONE; k++) {
+        float wk = k == 0 ? (m >= 0.999 ? 0.0 : 1.0 - (m > 0.001 ? m : 0.0)) : (m > 0.001 ? m : 0.0);
+        if (wk <= 0.0) continue;
+        g_zoom = k == 0 ? zoomA : zoomB;
+        col += wk * sceneColor(k == 0 ? sceneA : sceneB, k == 0 ? seedA : seedB);
+    }
+    g_zoom = 1.0;
+    col += pal(0.6 + time * 0.05) * rimGlow * 0.6;                      // a glowing rim around the opening
 
     // crisp oscilloscope ring traced by the live waveform
     if (fx_scope > 0.0) {
@@ -1257,7 +1540,7 @@ void main() {
     // Temporal smoothing: a light blend with the last frame hides the flicker of
     // detail smaller than a pixel (strongest while flying through the tunnels).
     vec3 prev = texture(texPrev, v_uv).rgb;
-    col = mix(col, prev, temporal * (sceneA >= 3 ? 1.0 : 0.5));
+    col = mix(col, prev, temporal * (sceneA == 11 ? 0.25 : sceneA >= 3 ? 1.0 : 0.5));   // ink lines would smear
     // afterglow: keep the brighter of now and a faded last frame
     if (sceneA < 3) col = max(col, prev * fx_trails);       // 3D flights would smear into streaks
 

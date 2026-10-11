@@ -23,7 +23,7 @@ SETTINGS_PATH = ROOT / "settings.json"
 THEMES_DIR = ROOT / "themes"
 
 SCENES = ["julia", "mandelbrot", "apollonian", "kifs", "spheres", "kleinian", "journey",
-          "netofbeing", "cosmicocean", "watchingwoods", "cubecascade"]
+          "netofbeing", "cosmicocean", "watchingwoods", "cubecascade", "allseeing"]
 SCENE_LABELS = {
     "julia": "Julia set (2D)",
     "mandelbrot": "Mandelbrot dive (2D)",
@@ -36,6 +36,7 @@ SCENE_LABELS = {
     "cosmicocean": "Cosmic Ocean (3D)",
     "watchingwoods": "Watching Woods (3D)",
     "cubecascade": "Cube Cascade (3D)",
+    "allseeing": "All-Seeing Spiral (3D)",
 }
 
 # The Infinite Journey's fractals: (name, family, four shape numbers, colour offset).
@@ -100,11 +101,17 @@ DEFAULT_SETTINGS = {
     "show_hud": False,
     "render_scale": 1.0,        # < 1.0 renders fewer pixels, then upscales
     "auto_quality": True,       # lower the render scale automatically if frames get slow
-    "fps_cap": 0,               # frame-rate cap; 0 = match the display's refresh rate
+    "fps_cap": 60,              # frame-rate cap; 0 = match the display's refresh rate
+    "idle_fps": 30,             # frame-rate cap while nothing is playing
+    "vsync": True,              # wait for the display's refresh before showing a frame (no tearing)
+    "gpu_budget": 0.5,          # automatic quality keeps the GPU busy at most this share of the time
+    "lod_bias": 0.0,            # level of detail: -1 = sharpest far detail .. 2 = fastest
+    "pause_when_hidden": True,  # stop rendering while other windows cover the whole screen
+    "auto_configured": False,   # set once the first-launch hardware check has picked settings
     "antialias": 2,             # samples per axis for the 2D fractals (1 = off, 2 = 4x, 3 = 9x)
     "waveform_ring": False,     # draw the oscilloscope ring in the middle
-    "smoothness": 0.6,
-    "silence_fade": True,       # fade to near-grey and slow almost to a stop when nothing plays          # 0 = snappy and twitchy .. 1 = slow and silky
+    "smoothness": 0.6,          # 0 = snappy and twitchy .. 1 = slow and silky
+    "silence_fade": True,       # fade to near-grey and slow almost to a stop when nothing plays
 }
 
 THEME_DEFAULTS = {

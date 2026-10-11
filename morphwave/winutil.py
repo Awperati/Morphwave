@@ -188,6 +188,59 @@ def fullscreen_app_on(x, y, w, h, own_hwnd):
     return r.left <= x and r.top <= y and r.right >= x + w and r.bottom >= y + h
 
 
+def dwm_flush():
+    """Block until the desktop compositor's next frame."""
+    try:
+        ctypes.windll.dwmapi.DwmFlush()
+    except OSError:
+        pass
+
+
+def _cloaked(hwnd):
+    """Windows hides some apps (suspended Store apps, other virtual desktops) by cloaking them."""
+    val = ctypes.c_int(0)
+    try:
+        ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 14, ctypes.byref(val), ctypes.sizeof(val))
+    except OSError:
+        return False
+    return val.value != 0
+
+
+def covered(x, y, w, h, own_hwnd, stop_at_own=False):
+    """True when other windows hide (nearly) all of this monitor, so nobody can see us.
+
+    Catches maximised windows too, which leave the taskbar strip uncovered.
+    Windows are checked from the top of the z-order down; with stop_at_own, only
+    the ones above our own window count (fullscreen mode).
+    """
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_EX_NOACTIVATE = 0x80, 0x20, 0x08000000
+    found = [False]
+    cls = ctypes.create_unicode_buffer(64)
+
+    def visit(hwnd, _):
+        if hwnd == own_hwnd:
+            return not stop_at_own                       # windows below ours cannot hide us
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd) or _cloaked(hwnd):
+            return True
+        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        if ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE):   # overlays, tool palettes
+            return True
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            return True
+        r = _RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+        ix = max(0, min(r.right, x + w) - max(r.left, x))
+        iy = max(0, min(r.bottom, y + h) - max(r.top, y))
+        if ix * iy >= 0.85 * w * h:
+            found[0] = True
+            return False
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(visit), 0)
+    return found[0]
+
+
 class GlobalHotkeys(threading.Thread):
     """System-wide shortcuts, so the app can be controlled while it is the wallpaper.
 

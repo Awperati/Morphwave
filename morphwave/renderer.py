@@ -81,6 +81,12 @@ class Renderer:
         self._fb_size = self._win_size = (1, 1)
         self.occluded = False
         self._cam_z = 0.0
+        self.gpu_ms = 0.0            # GPU time per frame, measured with timer queries
+        self.lod_dyn = 0.0           # extra LOD bias the automatic quality adds on top of the setting
+        self.frame_cap = 60          # the frame rate actually aimed for right now
+        self.paused = ""             # why rendering is paused ("" = it isn't)
+        self.autotune_runs = 0       # bumped each time the automatic setup finishes
+        self.autotune_report = ""
 
     @property
     def theme(self):
@@ -157,6 +163,11 @@ class Renderer:
         self.card_tex = self._rgba_texture(np.zeros((2, 2, 4), np.uint8))
         self.card_size = (2, 2)
         self.fbos, self.fbo_size = None, None
+        # GPU timer queries, read a few frames later so the CPU never waits on the GPU
+        self._queries = [ctx.query(time=True) for _ in range(4)]
+        self._q_used = [False] * 4
+        self._q_i = 0
+        self._gpu_samples = []
 
     def _rgba_texture(self, rgba):
         h, w = rgba.shape[:2]
@@ -381,6 +392,8 @@ class Renderer:
                 self._set_mode("fullscreen" if self.mode == "wallpaper" else "wallpaper")
             elif act == "mode":
                 self._set_mode(arg)
+            elif act == "autotune":
+                self._autotune()
             elif act == "theme":
                 self.theme_index = (self.theme_index + arg) % len(self.themes)
                 self._begin_scene(now, fresh=True)
@@ -465,8 +478,9 @@ class Renderer:
             f"Morphwave  ·  {t['name']}  ({self.theme_index + 1}/{len(self.themes)})  ·  {scene}",
             f"Audio: {self.analyzer.device_name}" + (f"  ·  {a['bpm']:.0f} BPM" if a["bpm"] else ""),
             f"Vibe ({vibe_src}): energy {self.vibe[0]:.2f}  ·  brightness {self.vibe[1]:.2f}",
-            f"{self.fps:.0f} fps  ·  render scale {self.scale:.2f}  ·  speed {self.speed:.2f}  ·  next scene in "
-            f"{max(0, t['scene_beats'] - self.beats_in_scene)} beats",
+            f"{self.fps:.0f} fps (cap {self.frame_cap})  ·  GPU {self.gpu_ms:.1f} ms/frame "
+            f"(~{100 * self.gpu_ms * self.frame_cap / 1000:.0f}% busy)  ·  scale {self.scale:.2f}  ·  LOD {self.effective_lod():+.2f}",
+            f"speed {self.speed:.2f}  ·  next scene in {max(0, t['scene_beats'] - self.beats_in_scene)} beats",
         ]
         if self.nowplaying.describe():
             lines.insert(2, f"Now playing: {self.nowplaying.describe()}")
@@ -487,6 +501,86 @@ class Renderer:
         self.hud_tex.release()
         self.hud_tex = self._rgba_texture(arr.astype(np.uint8))
         self.hud_size = (w, h)
+
+    def detect_settings(self):
+        """Re-run the automatic setup (from the settings window; runs on the GL thread)."""
+        self._pending.append(("autotune", None))
+
+    def _autotune(self):
+        from . import autotune
+        report = autotune.run(self)
+        self.lod_dyn = 0.0
+        self.scale = float(self.s["render_scale"])
+        self.autotune_report = report
+        self.autotune_runs += 1
+        print("Automatic setup:", report)
+
+    def effective_lod(self):
+        return max(-1.0, min(3.0, float(self.s["lod_bias"]) + self.lod_dyn))
+
+    def _pace(self, now, silent):
+        """Frame cap. Vsync stays on (no tearing); below the refresh rate we sleep until the
+        next frame is due, waking a little early so the swap catches the right refresh.
+        (Swap intervals above 1 are ignored by Windows for desktop-composited windows.)"""
+        cap = int(self.s["fps_cap"]) or self.current_refresh
+        if silent:
+            cap = min(cap, int(self.s["idle_fps"]))
+        cap = max(10, min(cap, self.current_refresh))
+        self.frame_cap = cap
+        vs = 1 if self.s["vsync"] else 0
+        if self._vsync != vs:
+            glfw.swap_interval(vs)
+            self._vsync = vs
+        glfw.swap_buffers(self.win)
+        if vs and self.mode == "wallpaper":
+            # As the wallpaper we are a child window that Windows composites; the driver's vsync
+            # doesn't apply there, so wait for the compositor instead (stops tearing).
+            winutil.dwm_flush()
+        if cap < self.current_refresh * 0.97:
+            nxt = getattr(self, "_next_frame", now) + 1.0 / cap
+            t_now = time.perf_counter()
+            if nxt < t_now - 0.1:                      # fell far behind (a stall): restart the schedule
+                nxt = t_now
+            self._next_frame = nxt
+            wait = nxt - t_now - 0.6 / self.current_refresh
+            if wait > 0:
+                time.sleep(wait)
+
+    def _read_gpu_time(self):
+        """Collect the timer query from 3 frames ago (finished by now, so this doesn't stall)."""
+        i = (self._q_i + 1) % len(self._queries)
+        if self._q_used[i]:
+            try:
+                self._gpu_samples.append(self._queries[i].elapsed / 1e6)
+            except Exception:
+                pass
+
+    def _adapt_quality(self):
+        """Keep the GPU's share of each frame under the chosen budget (quieter fans, less power).
+        First trade far detail (LOD), then resolution; give both back when there is headroom."""
+        if not self._gpu_samples:
+            return
+        self._gpu_samples.sort()
+        self.gpu_ms = self._gpu_samples[len(self._gpu_samples) // 2]
+        self._gpu_samples.clear()
+        if not self.s["auto_quality"]:
+            self.lod_dyn = 0.0
+            return
+        budget = float(self.s["gpu_budget"]) * 1000.0 / self.frame_cap
+        top = float(self.s["render_scale"])
+        floor = min(top, 0.6)
+        if self.gpu_ms > budget:
+            over = self.gpu_ms / budget
+            if self.lod_dyn < 1.5:
+                self.lod_dyn = min(1.5, self.lod_dyn + (0.5 if over > 1.4 else 0.25))
+            elif self.scale > floor:
+                self.scale = max(floor, self.scale - (0.1 if over > 1.4 else 0.05))
+        elif self.gpu_ms < budget * 0.6:
+            if self.scale < top:
+                self.scale = min(top, self.scale + 0.05)
+            elif self.lod_dyn > 0.0:
+                self.lod_dyn = max(0.0, self.lod_dyn - 0.25)
+        self.scale = min(self.scale, top)
 
     # ---------- main loop ----------
     @staticmethod
@@ -518,6 +612,9 @@ class Renderer:
         seen_track = self.nowplaying.changes
         frame_times = []
         self._begin_scene(0.0, fresh=True)
+        if not self.s["auto_configured"] and not self.run_seconds:
+            self._autotune()                             # first launch: pick settings for this PC
+        adapt_t = time.perf_counter()
 
         while not glfw.window_should_close(self.win) and not self.quit:
             glfw.poll_events()
@@ -529,15 +626,23 @@ class Renderer:
             if self.run_seconds and t > self.run_seconds:
                 break
 
-            # Save the GPU while a game or video covers the wallpaper.
-            if now - occ_check > 1.0:
+            # Save the GPU whenever nobody can see us: a game, a video or maximised windows
+            # cover the wallpaper, or the fullscreen window is minimised or behind other windows.
+            if now - occ_check > 0.5:
                 occ_check = now
                 if self.mode == "wallpaper":
                     winutil.restack(self.hwnd)           # Explorer can reorder its children; keep the icons on top
-                occluded = self.mode == "wallpaper" and winutil.fullscreen_app_on(*self.mon_rect, self.hwnd)
-                self.occluded = occluded
+                reason = ""
+                if glfw.get_window_attrib(self.win, glfw.ICONIFIED):
+                    reason = "minimised"
+                elif self.mode != "windowed" and self.s["pause_when_hidden"] and not self.run_seconds and \
+                        winutil.covered(*self.mon_rect, self.hwnd, stop_at_own=self.mode == "fullscreen"):
+                    reason = "covered by other windows"
+                occluded = bool(reason)
+                self.occluded, self.paused = occluded, reason
             if occluded:
                 time.sleep(0.25)
+                last = time.perf_counter()               # don't jump ahead when we come back
                 continue
 
             # ---- music ----
@@ -688,6 +793,10 @@ class Renderer:
             self._set(p, "temporal", 0.06 + 0.12 * float(self.s["smoothness"]))
             self._set(p, "fx_scope", fx["scope"] if self.s["waveform_ring"] else 0.0)
             self._set(p, "beatAge", min(t - beat_time, 10.0))
+            self._set(p, "lodBias", self.effective_lod())
+            self._read_gpu_time()
+            query = self._queries[self._q_i]
+            query.mglo.begin()
             self.scene_vao.render(moderngl.TRIANGLE_STRIP)
 
             # ---- present ----
@@ -734,23 +843,16 @@ class Renderer:
             except KeyError:
                 pass
             self.present_vao.render(moderngl.TRIANGLE_STRIP)
+            query.mglo.end()
+            self._q_used[self._q_i] = True
+            self._q_i = (self._q_i + 1) % len(self._queries)
             if self.snapshot_path and self.run_seconds and t > self.run_seconds - 0.1:
                 data = self.ctx.screen.read(viewport=(0, 0, fw, fh), components=3)
                 Image.frombytes("RGB", (fw, fh), data).transpose(Image.FLIP_TOP_BOTTOM).save(self.snapshot_path)
                 print("snapshot saved:", self.snapshot_path)
                 self.snapshot_path = None
-            # frame cap: 0 = match the display (vsync); otherwise pace frames to the chosen rate
-            cap = int(self.s["fps_cap"]) or self.current_refresh
-            want_vsync = cap >= self.current_refresh
-            if want_vsync != self._vsync:
-                glfw.swap_interval(1 if want_vsync else 0)
-                self._vsync = want_vsync
-            glfw.swap_buffers(self.win)
-            if not want_vsync:
-                target = 1.0 / max(cap, 10)
-                while time.perf_counter() - now < target:
-                    remaining = target - (time.perf_counter() - now)
-                    time.sleep(remaining - 0.002 if remaining > 0.003 else 0)
+            # frame cap: the chosen rate (0 = the display's), lower while nothing plays
+            self._pace(now, silent=alive < 0.15 and self.s["silence_fade"])
             ping = 1 - ping
 
             # ---- frame rate and automatic quality ----
@@ -759,13 +861,9 @@ class Renderer:
                 avg = sum(frame_times) / len(frame_times)
                 frame_times.clear()
                 self.fps = 1.0 / max(avg, 1e-4)
-                if self.s["auto_quality"]:
-                    cap = float(self.s["render_scale"])
-                    goal = (int(self.s["fps_cap"]) or self.current_refresh) * 0.9
-                    if self.fps < goal * 0.85 and self.scale > 0.4:
-                        self.scale = max(0.4, self.scale - 0.1)
-                    elif self.fps > goal and self.scale < cap:
-                        self.scale = min(cap, self.scale + 0.05)
+            if time.perf_counter() - adapt_t > 0.5:
+                adapt_t = time.perf_counter()
+                self._adapt_quality()
 
         self.quit = True                                 # also tells the mouse hook to unhook
         if self.mode == "wallpaper":

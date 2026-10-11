@@ -50,6 +50,7 @@ over the bottom of the bare desktop to bring the dock up and click it there.
 | Menger tunnel (3D) | Flies through an endless, twisting stone sponge |
 | Sphere-lace tunnel (3D) | Flies through bubbles packed inside bubbles |
 | Kleinian caverns (3D) | Flies through organic limit-set caverns |
+| All-Seeing Spiral (3D) | An engraved ink tunnel of curling waves and watching eyes, flowing out of a giant eye |
 
 ## Default: the Infinite Journey
 
@@ -64,6 +65,20 @@ geometry itself morphs from one into the other as you fly into it.
 | Net of Being | An endless hall of arches whose walls are made of watching eyes |
 | Cosmic Ocean | Waves below, rippling sky-rings above, floating glowing shards |
 | Unimaginable Horrors | The eye forest, a flesh-coloured Net of Being and organic fractals |
+| All-Seeing Spiral | Blue-and-red engraving: rings of eyes and curling scrolls |
+
+## Performance
+
+On first launch Morphwave tests your graphics card for a moment and picks a frame-rate
+cap, level of detail, render scale and anti-aliasing (Settings → Display → **Detect best
+settings** runs it again). While it runs, the GPU's time per frame is measured and detail,
+then resolution, are traded to stay under the **GPU load limit** (default 50%: quieter fans).
+
+- **Frame rate cap:** 60–120 fps is plenty; matching a 240 Hz screen costs 3–4x the power.
+- **Level of detail:** Sharpest … Fastest. How far away fractals start to simplify.
+- **Frame rate while silent:** drops to 30 fps when nothing plays.
+- **V-sync** stops tearing; **Pause while covered** stops rendering when games, videos or
+  maximised windows hide it.
 
 ## How the music drives it
 
@@ -97,7 +112,8 @@ Settings → Visuals, then press **Save theme**.
 | [shaders.py](morphwave/shaders.py) | All fractals and effects (GLSL) |
 | [renderer.py](morphwave/renderer.py) | Window, frame loop, scene changes, speed, auto quality |
 | [settings_ui.py](morphwave/settings_ui.py) | Settings window |
-| [winutil.py](morphwave/winutil.py) | Wallpaper embedding, global hotkeys |
+| [winutil.py](morphwave/winutil.py) | Wallpaper embedding, global hotkeys, covered-screen check |
+| [autotune.py](morphwave/autotune.py) | Hardware check and GPU test that picks the settings |
 
 ## Run from source
 

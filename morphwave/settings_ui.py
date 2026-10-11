@@ -16,6 +16,14 @@ from tkinter import ttk
 
 from . import config
 
+LOD_CHOICES = {   # label: lod_bias
+    "Sharpest (more GPU)": -1.0,
+    "Sharp": -0.5,
+    "Balanced": 0.0,
+    "Fast": 0.75,
+    "Fastest (least GPU)": 1.5,
+}
+
 FX_RANGES = {  # key: (label, min, max)
     "speed": ("Speed", 0.1, 3.0),
     "detail": ("Detail (GPU cost)", 0.0, 1.0),
@@ -240,48 +248,106 @@ class SettingsWindow:
         mcb = self._row(f, "Monitor (on restart)", lambda p: ttk.Combobox(p, values=labels, textvariable=self.mon_var, state="readonly"), 1)
         mcb.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("monitor", mcb.current()))
 
-        self.scale_var = tk.DoubleVar(value=self.s["render_scale"])
-        self.scale_var.trace_add("write", lambda *_: self.s.__setitem__("render_scale", round(self.scale_var.get(), 2)))
-        self._row(f, "Max render scale", lambda p: ttk.Scale(p, from_=0.4, to=1.0, variable=self.scale_var), 2)
-        self._check(f, "Lower the render scale automatically if frames get slow", "auto_quality", 3)
+        # ---- performance ----
+        pf = ttk.LabelFrame(f, text="Performance and quality", padding=6)
+        pf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=8)
+        pf.columnconfigure(1, weight=1)
+        top_row = ttk.Frame(pf)
+        top_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Button(top_row, text="Detect best settings", command=self._autotune,
+                   state="normal" if self.renderer else "disabled").pack(side="left")
+        self.auto_lbl = ttk.Label(pf, text=(self.renderer.autotune_report if self.renderer else "")
+                                  or "Tests your graphics card for a moment, then picks the settings below.",
+                                  foreground="#555", wraplength=560, justify="left")
+        self.auto_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
         top = getattr(self.renderer, "refresh", 0) or 240
-        self.fps_var = tk.IntVar(value=int(self.s["fps_cap"]) or top)
-        fps_row = ttk.Frame(f)
-        fps_row.grid(row=9, column=0, columnspan=2, sticky="ew", pady=4)
+        self.fps_var = tk.IntVar()
+        fps_row = ttk.Frame(pf)
+        fps_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=3)
         ttk.Label(fps_row, text="Frame rate cap").pack(side="left")
         self.fps_cap_lbl = ttk.Label(fps_row, text="", width=16)
         self.fps_cap_lbl.pack(side="right")
-        sc = ttk.Scale(fps_row, from_=30, to=top, variable=self.fps_var)
-        sc.pack(side="left", fill="x", expand=True, padx=8)
+        ttk.Scale(fps_row, from_=30, to=top, variable=self.fps_var).pack(side="left", fill="x", expand=True, padx=8)
 
         def fps_changed(*_):
             v = int(round(self.fps_var.get()))
             self.s["fps_cap"] = 0 if v >= top - 1 else v           # the top of the slider = match the display
             self.fps_cap_lbl.config(text=f"{v} fps" + ("  (display)" if self.s["fps_cap"] == 0 else ""))
         self.fps_var.trace_add("write", fps_changed)
-        fps_changed()
-        self.aa_var = tk.StringVar(value={1: "Off", 2: "4x", 3: "9x"}.get(self.s["antialias"], "4x"))
-        acb = self._row(f, "Anti-aliasing (2D fractals)", lambda p: ttk.Combobox(p, values=["Off", "4x", "9x"],
-                                                                                 textvariable=self.aa_var, state="readonly"), 4)
-        acb.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("antialias", {"Off": 1, "4x": 2, "9x": 3}[self.aa_var.get()]))
 
+        self.lod_var = tk.StringVar()
+        lcb = self._row(pf, "Level of detail", lambda p: ttk.Combobox(p, values=list(LOD_CHOICES), textvariable=self.lod_var,
+                                                                      state="readonly"), 3)
+        lcb.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("lod_bias", LOD_CHOICES[self.lod_var.get()]))
+        ttk.Label(pf, text="How far into the distance fractals keep their full detail. Lower settings simplify\n"
+                           "far-away structure first, where it is smaller than a pixel anyway.",
+                  foreground="#555").grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        self.budget_var = tk.DoubleVar()
+        budget_row = ttk.Frame(pf)
+        budget_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=3)
+        ttk.Label(budget_row, text="GPU load limit").pack(side="left")
+        self.budget_lbl = ttk.Label(budget_row, text="", width=22)
+        self.budget_lbl.pack(side="right")
+        ttk.Scale(budget_row, from_=0.15, to=1.0, variable=self.budget_var).pack(side="left", fill="x", expand=True, padx=8)
+
+        def budget_changed(*_):
+            self.s["gpu_budget"] = round(float(self.budget_var.get()), 2)
+            self.budget_lbl.config(text=f"{self.s['gpu_budget']:.0%}  (lower = quieter)")
+        self.budget_var.trace_add("write", budget_changed)
+        self.auto_var = self._check(pf, "Adjust detail and resolution automatically to stay under the GPU limit", "auto_quality", 6)
+
+        self.scale_var = tk.DoubleVar()
+        self.scale_var.trace_add("write", lambda *_: self.s.__setitem__("render_scale", round(self.scale_var.get(), 2)))
+        self._row(pf, "Max render scale", lambda p: ttk.Scale(p, from_=0.4, to=1.0, variable=self.scale_var), 7)
+        self.aa_var = tk.StringVar()
+        acb = self._row(pf, "Anti-aliasing (2D fractals)", lambda p: ttk.Combobox(p, values=["Off", "4x", "9x"],
+                                                                                  textvariable=self.aa_var, state="readonly"), 8)
+        acb.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("antialias", {"Off": 1, "4x": 2, "9x": 3}[self.aa_var.get()]))
+        self.idle_var = tk.StringVar()
+        icb = self._row(pf, "Frame rate while silent", lambda p: ttk.Combobox(p, values=["15", "20", "30", "60"],
+                                                                              textvariable=self.idle_var, state="readonly", width=6), 9)
+        icb.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("idle_fps", int(self.idle_var.get())))
+        self.vsync_var = self._check(pf, "V-sync (wait for the screen's refresh; stops tearing)", "vsync", 10)
+        self._check(pf, "Pause while other windows cover the whole screen", "pause_when_hidden", 11)
+        self.fps_lbl = ttk.Label(pf, text="")
+        self.fps_lbl.grid(row=12, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._load_perf_fields()
+
+        # ---- look ----
         def hud_changed():
             if self.renderer:
                 self.renderer.show_hud = self.s["show_hud"]
-        self._check(f, "Show info overlay (HUD)", "show_hud", 5, hud_changed)
-        self._check(f, "Show the waveform ring in the middle", "waveform_ring", 8)
+        self._check(f, "Show info overlay (HUD)", "show_hud", 3, hud_changed)
+        self._check(f, "Show the waveform ring in the middle", "waveform_ring", 4)
         self.smooth_var = tk.DoubleVar(value=self.s["smoothness"])
         self.smooth_var.trace_add("write", lambda *_: self.s.__setitem__("smoothness", round(self.smooth_var.get(), 2)))
-        self._row(f, "Smoothness (snappy ↔ silky)", lambda p: ttk.Scale(p, from_=0.0, to=1.0, variable=self.smooth_var), 9)
-        self.fps_lbl = ttk.Label(f, text="")
-        self.fps_lbl.grid(row=6, column=0, columnspan=2, sticky="w", pady=6)
+        self._row(f, "Smoothness (snappy ↔ silky)", lambda p: ttk.Scale(p, from_=0.0, to=1.0, variable=self.smooth_var), 5)
 
         ttk.Label(f, text=(
             "Shortcuts (work everywhere, even as wallpaper):\n"
             "  Ctrl+Alt+S  settings\n  Ctrl+Alt+→ / ←  next / previous theme\n  Ctrl+Alt+Space  next scene\n"
             "  Ctrl+Alt+H  info overlay\n  Ctrl+Alt+W  switch fullscreen / wallpaper\n  Ctrl+Alt+Q  quit\n\n"
-            "As wallpaper, it pauses while a game or video fills the screen."),
-            justify="left", foreground="#444").grid(row=7, column=0, columnspan=2, sticky="w", pady=12)
+            "Rendering pauses while a game, a video or maximised windows hide it."),
+            justify="left", foreground="#444").grid(row=6, column=0, columnspan=2, sticky="w", pady=12)
+
+    def _load_perf_fields(self):
+        """Show the current performance settings (again after "Detect best settings")."""
+        top = getattr(self.renderer, "refresh", 0) or 240
+        self.fps_var.set(int(self.s["fps_cap"]) or top)
+        self.lod_var.set(min(LOD_CHOICES, key=lambda k: abs(LOD_CHOICES[k] - float(self.s["lod_bias"]))))
+        self.budget_var.set(float(self.s["gpu_budget"]))
+        self.auto_var.set(bool(self.s["auto_quality"]))
+        self.scale_var.set(float(self.s["render_scale"]))
+        self.aa_var.set({1: "Off", 2: "4x", 3: "9x"}.get(self.s["antialias"], "4x"))
+        self.idle_var.set(str(self.s["idle_fps"]))
+        self.vsync_var.set(bool(self.s["vsync"]))
+
+    def _autotune(self):
+        self._say("Testing the graphics card...")
+        self._seen_autotune = self.renderer.autotune_runs
+        self.renderer.detect_settings()
 
     # ---------- theme editing ----------
     def _theme(self):
@@ -375,5 +441,14 @@ class SettingsWindow:
         if self.renderer:
             e, b = self.renderer.vibe
             self.vibe_lbl.config(text=f"Current vibe: energy {e:.2f} · brightness {b:.2f}")
-            self.fps_lbl.config(text=f"{self.renderer.fps:.0f} fps · render scale {self.renderer.scale:.2f}")
+            r = self.renderer
+            state = f"paused ({r.paused})" if r.paused else (
+                f"{r.fps:.0f} fps · GPU {r.gpu_ms:.1f} ms per frame (~{100 * r.gpu_ms * r.frame_cap / 1000:.0f}% busy)"
+                f" · render scale {r.scale:.2f} · LOD {r.effective_lod():+.2f}")
+            self.fps_lbl.config(text="Now: " + state)
+            if getattr(self, "_seen_autotune", None) is not None and r.autotune_runs != self._seen_autotune:
+                self._seen_autotune = None
+                self._load_perf_fields()
+                self.auto_lbl.config(text=r.autotune_report)
+                self._say("Applied and saved the detected settings.")
         self.root.after(150, self._tick)
