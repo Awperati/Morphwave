@@ -33,7 +33,8 @@ def main():
             shutil.copy2(src, keep / name)
 
     sep = ";"
-    cmd = [str(ROOT / ".venv" / "Scripts" / "pyinstaller.exe"), "--noconfirm", "--clean", "--windowed",
+    # PyInstaller through this Python (the venv's pyinstaller.exe launcher breaks when Python updates itself)
+    cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
            "--name", "Morphwave", "--icon", "assets/morphwave.ico", "--version-file", "version_info.txt",
            "--add-data", f"assets{sep}assets", "--add-data", f"themes{sep}themes",
            "--add-binary", f"{GLFW / 'glfw3.dll'}{sep}glfw", "--add-binary", f"{GLFW / 'msvcr120.dll'}{sep}glfw",
