@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from . import config, shaders, winutil
+from .curl import SpiralCurl
 from .audio import N_BANDS, WAVE_POINTS
 
 FX_UNIFORMS = {"detail": "fx_detail", "glow": "fx_glow", "kaleido": "fx_kaleido", "trails": "fx_trails",
@@ -598,6 +599,7 @@ class Renderer:
         env = {"bass": 0.0, "mid": 0.0, "high": 0.0, "level": 0.0}
         beat, last_beats = 0.0, 0
         travel = spin = spin_rate = 0.0
+        spiral = SpiralCurl()                    # the All-Seeing Spiral's curls, wound by the bass (curl.py)
         atime = 0.0
         beat_time = -10.0
         wave_s = np.zeros(WAVE_POINTS, np.float32)
@@ -765,6 +767,9 @@ class Renderer:
             self._set(p, "sceneAge", t - self.scene_started)
             self._set(p, "travel", travel)
             self._set(p, "spin", spin)
+            curl, wind, _ = spiral.update(dt, a["bass"], fx.get("react", 1.0))
+            self._set(p, "curl", curl)
+            self._set(p, "curlWind", wind)
             for key in env:
                 self._set(p, key, env[key])
             self._set(p, "beat", beat)

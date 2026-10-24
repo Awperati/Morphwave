@@ -40,6 +40,8 @@ uniform float time;
 uniform float atime;      // time that only advances while music plays (stops in silence)
 uniform float travel;      // distance fallen / flown; speed follows BPM and pace
 uniform float spin;        // accumulated rotation; faster with mids
+uniform float curl;        // All-Seeing Spiral: the curls' accumulated turn, its speed set by the bass (curl.py)
+uniform float curlWind;    // and how tightly they wind, 0..1 (the eased bass)
 uniform float bass;
 uniform float mid;
 uniform float high;
@@ -1299,6 +1301,7 @@ float g_eySpiral;             // curl: position across its spiral arms
 float g_eyCurlR;              // curl: distance from its centre / its size
 vec2 g_eyEye;                 // eyeball: position on the eye, -1..1 across
 float g_eyId;                 // which ring / eye, for variety
+float g_eyPulse;              // the beat, 0..1: the eyes swell with it, and the tunnel breathes
 
 float eyTwist(float z) { return 0.22 * sin(z * 0.11 + atime * 0.05) + spin * 0.06; }
 
@@ -1315,7 +1318,7 @@ float eyDE(vec3 p) {
     float rz = p.z - g_camZ;
     float r = length(p.xy);
     float ang = atan(p.y, p.x) + eyTwist(p.z);
-    float swellB = 1.0 + fx_react * 0.06 * bass;
+    float swellB = 1.0 + fx_react * (0.06 * bass + 0.05 * g_eyPulse);
     float wall = EY_R * swellB + 0.05 - r;
     float d = wall;
     g_eyPart = 0.0;
@@ -1337,7 +1340,7 @@ float eyDE(vec3 p) {
     float ce = floor(ae / seg + 0.5);
     float rm = EY_R * swellB - bh;
     vec3 eq = vec3((ae - ce * seg) * rm, h - bh, zf + 0.085);
-    float dEye = length(eq * vec3(0.42, 0.95, 1.5)) - 0.09;
+    float dEye = length(eq * vec3(0.42, 0.95, 1.5)) - 0.09 * (1.0 + 0.4 * g_eyPulse);
     if (dEye * 0.5 < d) { d = dEye * 0.5; g_eyPart = 3.0; g_eyEye = eq.xy / vec2(0.2, 0.1); g_eyId = zi * 13.0 + ce; }
 
     // ---- circles of curling scrolls between the bands ----
@@ -1353,8 +1356,9 @@ float eyDE(vec3 p) {
     vec2 q = u - vec2(0.0, size + 0.02);
     if (mod(cc + zi2, 2.0) > 0.5) q.x = -q.x;                     // neighbours curl the other way
     float k;
-    float pitch = size * 0.36;
-    float sd = eySpiral(q, pitch, atime * 0.35 + spin * 0.6 + zi2 * 1.7, k);
+    // the curls wind in and out with the bass (curl: turned on the CPU, so it never jumps), tighter as it swells
+    float pitch = size * 0.36 * (1.0 - 0.4 * curlWind);
+    float sd = eySpiral(q, pitch, curl + zi2 * 1.7, k);
     float cr = length(q);
     sd = max(sd, cr - size);                                      // only inside its circle
     float th = 0.02 + 0.024 * cr / size;                          // thinner at the heart
@@ -1418,6 +1422,7 @@ vec4 eyInkEye(vec2 q, float fw, float seed, float big) {
 vec3 allSeeing(vec2 uv) {
     vec3 ro = vec3(0.0, 0.0, travel * FLY);
     g_camZ = ro.z;
+    g_eyPulse = fx_react * clamp(0.6 * beat + 0.5 * exp(-beatAge * 6.0) * fx_punch, 0.0, 1.0);
     vec3 rd = normalize(vec3(uv, 1.0));
     rd.xy = rot(0.05 * sin(time * 0.1)) * rd.xy;
     float pixel = 1.0 / resolution.y;
@@ -1475,7 +1480,7 @@ vec3 allSeeing(vec2 uv) {
         red = max(red * 0.3, ink.y);
         glowIris = ink.z;
     } else if (part > 3.5) {                                                  // the giant eye at the end
-        vec2 q = rot(-eyTwist(p.z)) * p.xy / vec2(1.25, 1.25);
+        vec2 q = rot(-eyTwist(p.z)) * p.xy / vec2(1.25, 1.25) / (1.0 + 0.2 * g_eyPulse);   // it swells on the beat
         vec4 ink = eyInkEye(q, fw / 1.25, 0.0, 1.0);
         float outside = smoothstep(0.0, 0.02, abs(q.y) - 0.55 * (1.0 - q.x * q.x)) + step(1.0, abs(q.x));
         // around the eye: faint rings, the same pale paper the far tunnel fades into
