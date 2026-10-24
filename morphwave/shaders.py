@@ -1156,14 +1156,9 @@ float g_cubeH;
 const float SHELL_S = 2.0;
 const float CELLS = 10.0;          // cubes across each face
 float g_phase;                     // streaming phase 0..1
-// distance to the tiled faces and edges of the shell with half-size R
-float shellDE(vec3 p, float R, float shellId, bool detail) {
-    vec3 ap = abs(p);
-    float m = max(ap.x, max(ap.y, ap.z));
-    // which face: the largest axis
-    vec3 f = ap.x >= ap.y && ap.x >= ap.z ? vec3(1, 0, 0) : (ap.y >= ap.z ? vec3(0, 1, 0) : vec3(0, 0, 1));
+// one face's tile nearest p (face f of the shell with half-size R): x its distance, y its hash (the colour)
+vec2 faceTile(vec3 p, vec3 ap, vec3 f, float R, float cell, float shellId) {
     vec2 uv = f.x > 0.5 ? p.yz : (f.y > 0.5 ? p.xz : p.xy);
-    float cell = 2.0 * R / CELLS;
     vec2 id = clamp(floor(uv / cell), vec2(-CELLS * 0.5), vec2(CELLS * 0.5 - 1.0));
     vec2 l2 = uv - (id + 0.5) * cell;
     float side = dot(sign(p), f);
@@ -1171,11 +1166,45 @@ float shellDE(vec3 p, float R, float shellId, bool detail) {
     float band = spec(fract(h * 0.93 + 0.03));
     float grow = fx_react * (0.7 * band * level + 0.2 * bass + 0.12 * exp(-beatAge * 4.0) * fx_punch);
     float wv = sin(dot(id, vec2(0.6, 0.45)) + shellId * 1.7 - travel * 3.0);
-    float sz = cell * (0.19 + 0.07 * h + 0.025 * sin(atime * (0.6 + h) + h * 40.0) + 0.07 * grow + 0.03 * wv * level);
+    // the innermost shells shrink away as they stream in, so nothing crowds the camera (cutting them off left
+    // sliced cubes that looked like pyramids)
+    float sz = cell * (0.19 + 0.07 * h + 0.025 * sin(atime * (0.6 + h) + h * 40.0) + 0.07 * grow + 0.03 * wv * level) * smoothstep(0.3, 0.75, R);
     float lift = cell * (0.25 + 0.5 * grow);                         // cubes stand slightly inside the face
-    vec3 l = vec3(l2, m - (R - lift));
+    vec3 l = vec3(l2, dot(ap, f) - (R - lift));
     // sparse tiles so you can see straight through each shell to the next one out
-    float d = h > 0.72 ? sdRBox(l, vec3(sz), sz * 0.16) : abs(m - R) + cell * 0.2;
+    return vec2(h > 0.72 && sz > 1e-4 ? sdRBox(l, vec3(sz), sz * 0.16) : 1e9, h);
+}
+// distance to the tiled faces and edges of the shell with half-size R
+float shellDE(vec3 p, float R, float shellId, bool detail) {
+    vec3 ap = abs(p);
+    float m = max(ap.x, max(ap.y, ap.z));
+    // which face: the largest axis
+    vec3 f = ap.x >= ap.y && ap.x >= ap.z ? vec3(1, 0, 0) : (ap.y >= ap.z ? vec3(0, 1, 0) : vec3(0, 0, 1));
+    float cell = 2.0 * R / CELLS;
+    vec2 tile = faceTile(p, ap, f, R, cell, shellId);
+    float second = ap.x + ap.y + ap.z - m - min(ap.x, min(ap.y, ap.z));
+    if (m - second < cell) {
+        // near the seam with the next face: a cube standing on that face reaches over it (judged from this
+        // face alone, the part across the seam came out as a pyramid)
+        vec3 rest = ap * (1.0 - f);
+        vec3 f2 = rest.x >= rest.y && rest.x >= rest.z ? vec3(1, 0, 0) : (rest.y >= rest.z ? vec3(0, 1, 0) : vec3(0, 0, 1));
+        vec2 t2 = faceTile(p, ap, f2, R, cell, shellId);
+        if (t2.x < tile.x) tile = t2;
+    }
+    float d = tile.x;
+    float h = tile.y;
+    // This cell's tile (or its emptiness) says nothing about the next cell's, which stands at its own height and
+    // size: stepping past it tore cubes and left holes. A neighbour's tile is at least this cell's border (or the
+    // seam where the face changes) plus the gap round its own tile away; outside the layer the tiles live in,
+    // the layer itself bounds the step.
+    vec2 uv = f.x > 0.5 ? p.yz : (f.y > 0.5 ? p.xz : p.xy);
+    vec2 l2 = uv - (clamp(floor(uv / cell), vec2(-CELLS * 0.5), vec2(CELLS * 0.5 - 1.0)) + 0.5) * cell;
+    float gMax = fx_react * (0.7 * level + 0.2 * bass + 0.12 * fx_punch);
+    float szMax = min(cell * (0.315 + 0.07 * gMax + 0.03 * level), 0.45 * cell);
+    float slab = max(m - (R - 0.25 * cell + szMax), (R - cell * (0.25 + 0.5 * gMax) - szMax) - m);
+    vec2 toBorder = 0.5 * cell - abs(l2);
+    float leave = max(min(min(toBorder.x, toBorder.y), (m - second) * 0.7071), 0.0);
+    d = min(d, max(slab, leave + 0.5 * cell - szMax));
     g_cubeH = h;
     // edge bars: where two of the coordinates are near R
     vec3 e = abs(ap - R);
@@ -1183,7 +1212,7 @@ float shellDE(vec3 p, float R, float shellId, bool detail) {
     // each bar runs only along the shell's own edge, not off to infinity
     vec3 over = max(ap - R, 0.0);
     float bar = min(min(length(vec3(e.x, e.y, over.z)), length(vec3(e.y, e.z, over.x))), length(vec3(e.x, e.z, over.y)))
-              - cell * (0.22 + 0.1 * bass * fx_react);
+              - cell * (0.22 + 0.1 * bass * fx_react) * smoothstep(0.3, 0.75, R);
     if (bar < d) { d = bar; g_cubeH = -1.0; }
     return d;
 }
@@ -1197,8 +1226,6 @@ float cubeDE(vec3 p) {
     float d1 = shellDE(p, R1, k1, true);
     if (d0 < d1) g_cubeH = h0;
     float d = min(d0, d1);
-    // the innermost shells are hidden so nothing crowds the camera
-    if (R0 < 0.6) d = min(d1, max(d0, 0.6 - m));
     return d * 0.8;
 }
 vec3 cubeCascade(vec2 uv) {
@@ -1224,8 +1251,8 @@ vec3 cubeCascade(vec2 uv) {
         vec3 p = ro + rd * t;
         float d = cubeDE(p);
         if (d < 0.0012 * t * lodEps()) { hit = true; break; }
-        // over-relaxed stepping far away: fewer steps for the distant shells
-        t += d * (t > 4.0 ? 1.15 : 1.0);
+        // plain steps: over-relaxing them landed rays inside cubes, whose insides lit up as pyramids
+        t += d;
         steps += 1.0;
         if (t > 60.0) break;
     }
