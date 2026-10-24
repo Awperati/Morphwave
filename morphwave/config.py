@@ -95,6 +95,8 @@ DEFAULT_SETTINGS = {
     "audio_device": "",         # playback device to listen to; empty = Windows default
     "vibe_mode": "auto",        # auto = read the vibe from the music; otherwise a name from VIBES
     "scene_change_on_track": True,
+    "music_colour": "full",    # colour from music: off | subtle | full (the owner: "Fully drives colours")
+    "colour_scroll": 90,       # seconds for the hue wheel to turn once across the EQ bands: 60 | 90 | 120
     "mode": "fullscreen",       # fullscreen | wallpaper | windowed
     "monitor": 0,               # 0 = primary
     "start_theme": "",          # theme file name without extension; empty = first

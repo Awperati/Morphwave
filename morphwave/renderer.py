@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from . import config, shaders, winutil
 from .curl import SpiralCurl
+from .musiccolour import MUSIC_COLOUR, MusicColour
 from .audio import N_BANDS, WAVE_POINTS
 
 FX_UNIFORMS = {"detail": "fx_detail", "glow": "fx_glow", "kaleido": "fx_kaleido", "trails": "fx_trails",
@@ -600,6 +601,7 @@ class Renderer:
         beat, last_beats = 0.0, 0
         travel = spin = spin_rate = 0.0
         spiral = SpiralCurl()                    # the All-Seeing Spiral's curls, wound by the bass (curl.py)
+        music = MusicColour()                    # colour from music: each EQ band's hue, by its level (musiccolour.py)
         atime = 0.0
         beat_time = -10.0
         wave_s = np.zeros(WAVE_POINTS, np.float32)
@@ -843,6 +845,12 @@ class Renderer:
             self._set(q, "fx_sat", fx["saturation"])
             self._set(q, "alive", alive)
             self._set(q, "colorAmt", alive * (0.25 + 0.75 * min(1.0, loud * 1.3)))
+            music.scroll_s = float(self.s["colour_scroll"])
+            mc = music.update(dt, a["bands"], new_beat)
+            self._set(q, "musHue", [tuple(mc["hues"][:4]), tuple(mc["hues"][4:])])
+            self._set(q, "musW", [tuple(mc["weights"][:4]), tuple(mc["weights"][4:])])
+            self._set(q, "musLevel", [tuple(mc["levels"][:4]), tuple(mc["levels"][4:])])
+            self._set(q, "musAmt", MUSIC_COLOUR.get(self.s["music_colour"], 1.0))
             try:
                 q["bands"].write(np.asarray(a["bands"], np.float32).tobytes())
             except KeyError:

@@ -1602,10 +1602,53 @@ uniform float cardAlpha;
 in vec2 v_uv;
 out vec4 frag;
 
+uniform vec4 musHue[2];      // colour from music (musiccolour.py): each colour band's hue, bass first
+uniform vec4 musW[2];        // how much of the picture each takes (sums to 1)
+uniform vec4 musLevel[2];    // each one's level, eased
+uniform float musAmt;        // 0 = off .. 1 = the music sets the colour
+vec3 musRgb2hsv(vec3 c) {
+    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x);
+}
+vec3 musHsv2rgb(vec3 c) {
+    vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+vec3 musicColour(vec3 col) {
+    if (musAmt <= 0.0) return col;
+    vec3 hsv = musRgb2hsv(col);
+    // where this pixel sits along the bands: its own hue and brightness pick the spot; a loud band covers more
+    float u = fract(hsv.x + hsv.z * 0.35);
+    vec2 dir = vec2(0.0);
+    float lv = 0.0, gs = 0.0, acc = 0.0;
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 4; j++) {
+            float w = musW[i][j];
+            float d = abs(u - (acc + 0.5 * w));
+            d = min(d, 1.0 - d);
+            acc += w;
+            float z = d / (0.5 * w + 0.04);
+            float g = (w + 0.001) * exp(-z * z);
+            float h = 6.2831853 * musHue[i][j];
+            dir += g * vec2(cos(h), sin(h));
+            lv += g * musLevel[i][j];
+            gs += g;
+        }
+    }
+    lv /= max(gs, 1e-6);
+    float hue = fract(atan(dir.y, dir.x) / 6.2831853 + 1.0);
+    vec3 m = musHsv2rgb(vec3(hue, mix(hsv.y, 0.5 + 0.45 * lv, 0.8), clamp(hsv.z * (0.85 + 0.3 * lv), 0.0, 1.0)));
+    return mix(col, m, musAmt);
+}
+
 void main() {
     vec2 c = v_uv - 0.5;
     vec2 d = c * fx_aberr * (0.002 + 0.008 * high);
     vec3 col = vec3(texture(scene, v_uv + d).r, texture(scene, v_uv).g, texture(scene, v_uv - d).b);
+    col = musicColour(col);   // each EQ band's hue, by how loud it is (musiccolour.py)
     float l = dot(col, vec3(0.299, 0.587, 0.114));
     col = mix(vec3(l), col, fx_sat * (0.9 + 0.25 * level) * colorAmt);   // the music provides the colour
     col *= mix(0.65, 1.05, colorAmt) * (1.0 - dot(c, c) * 0.55);

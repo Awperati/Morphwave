@@ -188,6 +188,13 @@ class SettingsWindow:
         self.vibe_lbl.grid(row=8 + len(config.VIBES), column=0, columnspan=2, sticky="w", pady=(6, 10))
         self._check(f, "Change scene when the song changes", "scene_change_on_track", 9 + len(config.VIBES))
         self._check(f, "Fade to grey and slow down when nothing is playing", "silence_fade", 10 + len(config.VIBES))
+        # colour from music (musiccolour.py): each EQ band, bass to treble, has its own colour
+        self.mc_var = tk.StringVar(value=self.s["music_colour"])
+        mc = self._row(f, "Colour from music", lambda p: ttk.Combobox(p, values=["off", "subtle", "full"], textvariable=self.mc_var, state="readonly", width=10), 11 + len(config.VIBES))
+        mc.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("music_colour", self.mc_var.get()))
+        self.scroll_var = tk.StringVar(value=str(self.s["colour_scroll"]))
+        sc = self._row(f, "Colour scroll (seconds a turn)", lambda p: ttk.Combobox(p, values=["60", "90", "120"], textvariable=self.scroll_var, state="readonly", width=10), 12 + len(config.VIBES))
+        sc.bind("<<ComboboxSelected>>", lambda *_: self.s.__setitem__("colour_scroll", int(self.scroll_var.get())))
 
     def _vibe_changed(self):
         self.s["vibe_mode"] = self.vibe_var.get()
